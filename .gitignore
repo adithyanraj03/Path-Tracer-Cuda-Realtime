@@ -29,10 +29,7 @@ cmake-build-*/
 *.suo
 *.user
 
-# Renders (keep config, ignore output)
-renders/*.png
-renders/*.ppm
-renders/*.bmp
+
 
 # OS
 Thumbs.db

@@ -23,19 +23,19 @@ __device__ bool hit_world(const Ray& r, const Primitive* d_prims, int num_prims,
     return hit_anything;
 }
 
-// Global Path Tracing Kernel
-__global__ void render_kernel(
-    Vec3* d_framebuffer, 
+// Global Path Tracing Kernel (1 SPP per call, accumulates)
+__global__ void render_accum_kernel(
+    Vec3* d_accumulation_buffer, 
     int image_width, 
     int image_height, 
-    int samples_per_pixel, 
     int max_depth,
     Camera camera, 
     Primitive* d_prims, 
     int num_prims, 
     Material* d_mats,
     Color bg_color,
-    unsigned long long rng_seed
+    unsigned long long rng_seed,
+    bool reset
 ) {
     int i = threadIdx.x + blockIdx.x * blockDim.x;
     int j = threadIdx.y + blockIdx.y * blockDim.y;
@@ -47,115 +47,254 @@ __global__ void render_kernel(
     curandState local_rand_state;
     curand_init(rng_seed + pixel_index, 0, 0, &local_rand_state);
 
-    Color pixel_color(0, 0, 0);
+    float u = (i + random_float(&local_rand_state)) / (image_width - 1);
+    float v = (j + random_float(&local_rand_state)) / (image_height - 1);
+    
+    // Ensure UV origin is bottom-left
+    Ray cur_ray = camera.get_ray(u, 1.0f - v);
+    
+    Color cur_attenuation(1.0f, 1.0f, 1.0f);
+    Color radiance(0.0f, 0.0f, 0.0f);
 
-    for (int s = 0; s < samples_per_pixel; ++s) {
-        float u = (i + random_float(&local_rand_state)) / (image_width - 1);
-        float v = (j + random_float(&local_rand_state)) / (image_height - 1);
-        
-        // Ensure UV origin is bottom-left as common in tracing
-        Ray cur_ray = camera.get_ray(u, 1.0f - v);
-        
-        Color cur_attenuation(1.0f, 1.0f, 1.0f);
-        Color radiance(0.0f, 0.0f, 0.0f);
-        bool done = false;
-
-        for (int depth = 0; depth < max_depth; depth++) {
-            HitRecord rec;
-            if (hit_world(cur_ray, d_prims, num_prims, 0.001f, PT_INFINITY, rec)) {
-                Ray scattered;
-                Color attenuation;
-                Color emitted;
+    for (int depth = 0; depth < max_depth; depth++) {
+        HitRecord rec;
+        if (hit_world(cur_ray, d_prims, num_prims, 0.001f, PT_INFINITY, rec)) {
+            Ray scattered;
+            Color attenuation;
+            Color emitted;
+            
+            Material mat = d_mats[rec.material_idx];
+            bool scatters = scatter(cur_ray, rec, mat, &local_rand_state, attenuation, scattered, emitted);
+            
+            radiance += cur_attenuation * emitted;
+            
+            if (scatters) {
+                cur_attenuation *= attenuation;
+                cur_ray = scattered;
                 
-                Material mat = d_mats[rec.material_idx];
-                
-                bool scatters = scatter(cur_ray, rec, mat, &local_rand_state, attenuation, scattered, emitted);
-                
-                radiance += cur_attenuation * emitted;
-                
-                if (scatters) {
-                    cur_attenuation *= attenuation;
-                    cur_ray = scattered;
-                    
-                    // Russian roulette termination after 3 bounces
-                    if (depth > 3) {
-                        float p = fmax(cur_attenuation.x(), fmax(cur_attenuation.y(), cur_attenuation.z()));
-                        if (random_float(&local_rand_state) > p) {
-                            break;
-                        }
-                        cur_attenuation /= p;
+                if (depth > 3) {
+                    float p = fmax(cur_attenuation.x(), fmax(cur_attenuation.y(), cur_attenuation.z()));
+                    if (random_float(&local_rand_state) > p) {
+                        break;
                     }
-                } else {
-                    break;
+                    cur_attenuation /= p;
                 }
             } else {
-                radiance += cur_attenuation * bg_color;
                 break;
             }
+        } else {
+            radiance += cur_attenuation * bg_color;
+            break;
         }
-        pixel_color += radiance;
     }
 
-    d_framebuffer[pixel_index] = pixel_color / float(samples_per_pixel);
+    if (reset) {
+        d_accumulation_buffer[pixel_index] = radiance;
+    } else {
+        d_accumulation_buffer[pixel_index] += radiance;
+    }
+}
+
+// Convert accumulated HDR buffer to standard 8-bit RGBA for OpenGL/saving
+__global__ void format_output_kernel(
+    Vec3* d_accumulation_buffer,
+    uchar4* d_output_texture, // Used for OpenGL interop
+    Vec3* d_output_framebuffer, // Used for saving to disk
+    int image_width,
+    int image_height,
+    int accumulated_frames
+) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (i >= image_width || j >= image_height) return;
+    int pixel_index = j * image_width + i;
+
+    Vec3 col = d_accumulation_buffer[pixel_index] / float(accumulated_frames);
+    col.e[0] = sqrt(fclamp(col.e[0], 0.0f, 0.999f));
+    col.e[1] = sqrt(fclamp(col.e[1], 0.0f, 0.999f));
+    col.e[2] = sqrt(fclamp(col.e[2], 0.0f, 0.999f));
+
+    if (d_output_texture) {
+        uchar4 rgba;
+        rgba.x = static_cast<unsigned char>(255.99f * col.e[0]);
+        rgba.y = static_cast<unsigned char>(255.99f * col.e[1]);
+        rgba.z = static_cast<unsigned char>(255.99f * col.e[2]);
+        rgba.w = 255;
+        // OpenGL expects lower-left origin, CUDA interop writes top-left to surface/array
+        // We handle coordinate matching in the shader, so we just write linearly or appropriately
+        // Actually for a cudaArray_t, OpenGL coordinates are top-down depending on how we map it.
+        // We'll write to a raw buffer, or directly via surface write. But cudaArray doesn't map easily as flat pointer.
+        // Wait, for this we'll need surface writes if using cudaArray.
+    }
+    
+    if (d_output_framebuffer) {
+        d_output_framebuffer[pixel_index] = col;
+    }
+}
+
+// Write to surface object (for OpenGL interop)
+__global__ void write_surface_kernel(
+    Vec3* d_accumulation_buffer,
+    cudaSurfaceObject_t surface,
+    int image_width,
+    int image_height,
+    int accumulated_frames
+) {
+    int i = threadIdx.x + blockIdx.x * blockDim.x;
+    int j = threadIdx.y + blockIdx.y * blockDim.y;
+
+    if (i >= image_width || j >= image_height) return;
+    int pixel_index = j * image_width + i;
+
+    Vec3 col = d_accumulation_buffer[pixel_index] / float(accumulated_frames);
+    col.e[0] = sqrt(fclamp(col.e[0], 0.0f, 0.999f));
+    col.e[1] = sqrt(fclamp(col.e[1], 0.0f, 0.999f));
+    col.e[2] = sqrt(fclamp(col.e[2], 0.0f, 0.999f));
+
+    uchar4 rgba;
+    rgba.x = static_cast<unsigned char>(255.99f * col.e[0]);
+    rgba.y = static_cast<unsigned char>(255.99f * col.e[1]);
+    rgba.z = static_cast<unsigned char>(255.99f * col.e[2]);
+    rgba.w = 255;
+
+    // Flip Y: OpenGL (0,0) = bottom-left, kernel j=0 = top row
+    surf2Dwrite(rgba, surface, i * sizeof(uchar4), (image_height - 1 - j));
+}
+
+void init_renderer(const SceneEnv& scene, RenderState& state) {
+    state.num_prims = scene.primitives.size();
+    if (state.num_prims > 0) {
+        CUDA_CHECK(cudaMalloc((void**)&state.d_prims, state.num_prims * sizeof(Primitive)));
+        CUDA_CHECK(cudaMemcpy(state.d_prims, scene.primitives.data(), state.num_prims * sizeof(Primitive), cudaMemcpyHostToDevice));
+    }
+
+    state.num_mats = scene.materials.size();
+    if (state.num_mats > 0) {
+        CUDA_CHECK(cudaMalloc((void**)&state.d_mats, state.num_mats * sizeof(Material)));
+        CUDA_CHECK(cudaMemcpy(state.d_mats, scene.materials.data(), state.num_mats * sizeof(Material), cudaMemcpyHostToDevice));
+    }
+
+    size_t fb_size = state.nx * state.ny * sizeof(Vec3);
+    CUDA_CHECK(cudaMalloc((void**)&state.d_framebuffer, fb_size));
+    CUDA_CHECK(cudaMalloc((void**)&state.d_accumulation_buffer, fb_size));
+    state.frame_seed = 42;
+}
+
+void render_frame(const SceneEnv& scene, RenderState& state, cudaArray_t target_texture, int current_spp) {
+    int tx = 8, ty = 8;
+    dim3 blocks(state.nx / tx + 1, state.ny / ty + 1);
+    dim3 threads(tx, ty);
+
+    bool reset = (current_spp == 1);
+    state.frame_seed += state.nx * state.ny;
+
+    render_accum_kernel<<<blocks, threads>>>(
+        state.d_accumulation_buffer, state.nx, state.ny, scene.config.max_depth,
+        scene.camera, state.d_prims, state.num_prims, state.d_mats, scene.config.background_color,
+        state.frame_seed, reset
+    );
+
+    if (target_texture != nullptr) {
+        // Create surface object from array
+        struct cudaResourceDesc resDesc;
+        memset(&resDesc, 0, sizeof(resDesc));
+        resDesc.resType = cudaResourceTypeArray;
+        resDesc.res.array.array = target_texture;
+
+        cudaSurfaceObject_t surface;
+        CUDA_CHECK(cudaCreateSurfaceObject(&surface, &resDesc));
+
+        write_surface_kernel<<<blocks, threads>>>(
+            state.d_accumulation_buffer, surface, state.nx, state.ny, current_spp
+        );
+        CUDA_CHECK(cudaDestroySurfaceObject(surface));
+    }
+
+    CUDA_CHECK(cudaGetLastError());
+    CUDA_CHECK(cudaDeviceSynchronize());
+}
+
+void save_render_state(RenderState& state, const std::string& output_filename, int current_spp) {
+    if (!state.d_framebuffer || !state.d_accumulation_buffer) return;
+
+    int tx = 8, ty = 8;
+    dim3 blocks(state.nx / tx + 1, state.ny / ty + 1);
+    dim3 threads(tx, ty);
+
+    format_output_kernel<<<blocks, threads>>>(
+        state.d_accumulation_buffer, nullptr, state.d_framebuffer, 
+        state.nx, state.ny, current_spp
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    int num_pixels = state.nx * state.ny;
+    std::vector<Vec3> h_framebuffer(num_pixels);
+    CUDA_CHECK(cudaMemcpy(h_framebuffer.data(), state.d_framebuffer, num_pixels * sizeof(Vec3), cudaMemcpyDeviceToHost));
+
+    std::vector<uint8_t> image_data(num_pixels * 3);
+    for (int j = 0; j < state.ny; j++) {
+        for (int i = 0; i < state.nx; i++) {
+            Vec3 col = h_framebuffer[j * state.nx + i];
+            int idx = (j * state.nx + i) * 3;
+            image_data[idx + 0] = static_cast<uint8_t>(255.99f * col.e[0]);
+            image_data[idx + 1] = static_cast<uint8_t>(255.99f * col.e[1]);
+            image_data[idx + 2] = static_cast<uint8_t>(255.99f * col.e[2]);
+        }
+    }
+
+    stbi_write_png(output_filename.c_str(), state.nx, state.ny, 3, image_data.data(), state.nx * 3);
+}
+
+void cleanup_renderer(RenderState& state) {
+    if (state.d_framebuffer) cudaFree(state.d_framebuffer);
+    if (state.d_accumulation_buffer) cudaFree(state.d_accumulation_buffer);
+    if (state.d_prims) cudaFree(state.d_prims);
+    if (state.d_mats) cudaFree(state.d_mats);
 }
 
 void render_scene(const SceneEnv& scene, const std::string& output_filename) {
-    int nx = scene.config.image_width;
-    int ny = scene.config.image_height;
-    int tx = 8;
-    int ty = 8;
+    RenderState state;
+    state.nx = scene.config.image_width;
+    state.ny = scene.config.image_height;
 
-    std::cerr << "Rendering " << nx << "x" << ny << " image with " 
+    std::cerr << "Rendering " << state.nx << "x" << state.ny << " image with " 
               << scene.config.samples_per_pixel << " spp..." << std::endl;
 
-    // Allocate frame buffer
-    int num_pixels = nx * ny;
-    size_t fb_size = num_pixels * sizeof(Vec3);
-    Vec3* d_framebuffer;
-    CUDA_CHECK(cudaMalloc((void**)&d_framebuffer, fb_size));
+    init_renderer(scene, state);
 
-    // Allocate geometry and materials
-    int num_prims = scene.primitives.size();
-    Primitive* d_prims = nullptr;
-    if (num_prims > 0) {
-        CUDA_CHECK(cudaMalloc((void**)&d_prims, num_prims * sizeof(Primitive)));
-        CUDA_CHECK(cudaMemcpy(d_prims, scene.primitives.data(), num_prims * sizeof(Primitive), cudaMemcpyHostToDevice));
-    }
-
-    int num_mats = scene.materials.size();
-    Material* d_mats = nullptr;
-    if (num_mats > 0) {
-        CUDA_CHECK(cudaMalloc((void**)&d_mats, num_mats * sizeof(Material)));
-        CUDA_CHECK(cudaMemcpy(d_mats, scene.materials.data(), num_mats * sizeof(Material), cudaMemcpyHostToDevice));
-    }
-
-    dim3 blocks(nx / tx + 1, ny / ty + 1);
-    dim3 threads(tx, ty);
-
-    // Render Kernel execution
     cudaEvent_t start, stop;
     cudaEventCreate(&start);
     cudaEventCreate(&stop);
-
     cudaEventRecord(start);
-    render_kernel<<<blocks, threads>>>(
-        d_framebuffer, nx, ny, scene.config.samples_per_pixel, scene.config.max_depth, 
-        scene.camera, d_prims, num_prims, d_mats, scene.config.background_color, 42
-    );
-    CUDA_CHECK(cudaGetLastError());
-    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Render loop
+    for (int i = 1; i <= scene.config.samples_per_pixel; i++) {
+        render_frame(scene, state, nullptr, i);
+    }
+
     cudaEventRecord(stop);
-    
-    float milliseconds = 0;
     cudaEventSynchronize(stop);
+    float milliseconds = 0;
     cudaEventElapsedTime(&milliseconds, start, stop);
 
+    // Format output to frame buffer for saving
+    int tx = 8, ty = 8;
+    dim3 blocks(state.nx / tx + 1, state.ny / ty + 1);
+    dim3 threads(tx, ty);
+    format_output_kernel<<<blocks, threads>>>(
+        state.d_accumulation_buffer, nullptr, state.d_framebuffer, 
+        state.nx, state.ny, scene.config.samples_per_pixel
+    );
+    CUDA_CHECK(cudaDeviceSynchronize());
+
+    // Stats
     float seconds = milliseconds / 1000.0f;
-    long long total_rays = (long long)nx * ny * scene.config.samples_per_pixel;
+    long long total_rays = (long long)state.nx * state.ny * scene.config.samples_per_pixel;
     double mrays_per_sec = (total_rays / 1e6) / seconds;
     
     std::cerr << "\n=== Render Statistics ===" << std::endl;
-    std::cerr << "  Resolution:    " << nx << "x" << ny << std::endl;
+    std::cerr << "  Resolution:    " << state.nx << "x" << state.ny << std::endl;
     std::cerr << "  Samples/pixel: " << scene.config.samples_per_pixel << std::endl;
     std::cerr << "  Max depth:     " << scene.config.max_depth << std::endl;
     std::cerr << "  Total rays:    " << total_rays << std::endl;
@@ -163,49 +302,24 @@ void render_scene(const SceneEnv& scene, const std::string& output_filename) {
     std::cerr << "  Throughput:    " << mrays_per_sec << " Mrays/sec" << std::endl;
     std::cerr << "========================\n" << std::endl;
 
-    // Read back framebuffer
+    // Save
+    int num_pixels = state.nx * state.ny;
     std::vector<Vec3> h_framebuffer(num_pixels);
-    CUDA_CHECK(cudaMemcpy(h_framebuffer.data(), d_framebuffer, fb_size, cudaMemcpyDeviceToHost));
+    CUDA_CHECK(cudaMemcpy(h_framebuffer.data(), state.d_framebuffer, num_pixels * sizeof(Vec3), cudaMemcpyDeviceToHost));
 
-    // Gamma correction and write out
     std::vector<uint8_t> image_data(num_pixels * 3);
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            size_t pixel_index = j * nx + i;
-            Vec3 col = h_framebuffer[pixel_index];
-
-            // Gamma 2.2 correction
-            col.e[0] = sqrt(fclamp(col.e[0], 0.0f, 0.999f));
-            col.e[1] = sqrt(fclamp(col.e[1], 0.0f, 0.999f));
-            col.e[2] = sqrt(fclamp(col.e[2], 0.0f, 0.999f));
-
-            int idx = (j * nx + i) * 3;
+    for (int j = 0; j < state.ny; j++) {
+        for (int i = 0; i < state.nx; i++) {
+            Vec3 col = h_framebuffer[j * state.nx + i];
+            int idx = (j * state.nx + i) * 3;
             image_data[idx + 0] = static_cast<uint8_t>(255.99f * col.e[0]);
             image_data[idx + 1] = static_cast<uint8_t>(255.99f * col.e[1]);
             image_data[idx + 2] = static_cast<uint8_t>(255.99f * col.e[2]);
         }
     }
 
-    stbi_write_png(output_filename.c_str(), nx, ny, 3, image_data.data(), nx * 3);
+    stbi_write_png(output_filename.c_str(), state.nx, state.ny, 3, image_data.data(), state.nx * 3);
     std::cerr << "Saved image to " << output_filename << std::endl;
 
-    // PPM Output 
-    std::string ppm_filename = "renders/output.ppm";
-    if (output_filename.find_last_of('.') != std::string::npos) {
-        ppm_filename = output_filename.substr(0, output_filename.find_last_of('.')) + ".ppm";
-    }
-    std::ofstream ppm(ppm_filename);
-    ppm << "P3\n" << nx << ' ' << ny << "\n255\n";
-    for (int j = 0; j < ny; j++) {
-        for (int i = 0; i < nx; i++) {
-            int idx = (j * nx + i) * 3;
-            ppm << (int)image_data[idx] << ' ' << (int)image_data[idx+1] << ' ' << (int)image_data[idx+2] << '\n';
-        }
-    }
-    std::cerr << "Saved image to " << ppm_filename << std::endl;
-
-    // Cleanup
-    cudaFree(d_framebuffer);
-    if (d_prims) cudaFree(d_prims);
-    if (d_mats) cudaFree(d_mats);
+    cleanup_renderer(state);
 }

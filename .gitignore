@@ -1,0 +1,53 @@
+# Build
+build/
+out/
+cmake-build-*/
+*.vcxproj*
+*.sln
+
+# Compiled
+*.exe
+*.obj
+*.o
+*.lib
+*.exp
+*.pdb
+*.ilk
+
+# CUDA
+*.cubin
+*.fatbin
+*.ptx
+*.gpu
+*.ii
+*.cudafe1.*
+
+# IDE
+.vs/
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Renders (keep config, ignore output)
+renders/*.png
+renders/*.ppm
+renders/*.bmp
+
+# OS
+Thumbs.db
+.DS_Store
+
+# Third-party (downloaded, not tracked)
+include/stb_image_write.h
+include/nlohmann/json.hpp
+
+# Misc
+*.log
+*.tmp
+
+
+
+*.md
+.claude
+nul

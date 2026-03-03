@@ -1,0 +1,326 @@
+{
+  "image_width": 400,
+  "image_height": 400,
+  "samples_per_pixel": 1024,
+  "max_depth": 10,
+  "background_color": [
+    0.0,
+    0.0,
+    0.0
+  ],
+  "camera": {
+    "lookfrom": [
+      278,
+      278,
+      -800
+    ],
+    "lookat": [
+      278,
+      278,
+      0
+    ],
+    "vup": [
+      0,
+      1,
+      0
+    ],
+    "vfov": 40.0
+  },
+  "materials": [
+    {
+      "type": "diffuse",
+      "albedo": [
+        0.65,
+        0.05,
+        0.05
+      ]
+    },
+    {
+      "type": "diffuse",
+      "albedo": [
+        0.12,
+        0.45,
+        0.15
+      ]
+    },
+    {
+      "type": "diffuse",
+      "albedo": [
+        0.73,
+        0.73,
+        0.73
+      ]
+    },
+    {
+      "type": "emissive",
+      "emission": [
+        15,
+        15,
+        15
+      ]
+    },
+    {
+      "type": "metal",
+      "albedo": [
+        0.8,
+        0.8,
+        0.9
+      ],
+      "fuzz": 0.1
+    },
+    {
+      "type": "dielectric",
+      "ior": 1.5
+    }
+  ],
+  "objects": [
+    {
+      "type": "triangle",
+      "material_index": 1,
+      "v0": [
+        555,
+        0,
+        0
+      ],
+      "v1": [
+        555,
+        555,
+        0
+      ],
+      "v2": [
+        555,
+        0,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 1,
+      "v0": [
+        555,
+        555,
+        0
+      ],
+      "v1": [
+        555,
+        555,
+        555
+      ],
+      "v2": [
+        555,
+        0,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 0,
+      "v0": [
+        0,
+        0,
+        0
+      ],
+      "v1": [
+        0,
+        0,
+        555
+      ],
+      "v2": [
+        0,
+        555,
+        0
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 0,
+      "v0": [
+        0,
+        555,
+        555
+      ],
+      "v1": [
+        0,
+        555,
+        0
+      ],
+      "v2": [
+        0,
+        0,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        0,
+        0,
+        0
+      ],
+      "v1": [
+        555,
+        0,
+        0
+      ],
+      "v2": [
+        0,
+        0,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        555,
+        0,
+        555
+      ],
+      "v1": [
+        0,
+        0,
+        555
+      ],
+      "v2": [
+        555,
+        0,
+        0
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        0,
+        555,
+        0
+      ],
+      "v1": [
+        0,
+        555,
+        555
+      ],
+      "v2": [
+        555,
+        555,
+        0
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        555,
+        555,
+        555
+      ],
+      "v1": [
+        555,
+        555,
+        0
+      ],
+      "v2": [
+        0,
+        555,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        0,
+        0,
+        555
+      ],
+      "v1": [
+        555,
+        0,
+        555
+      ],
+      "v2": [
+        0,
+        555,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 2,
+      "v0": [
+        555,
+        555,
+        555
+      ],
+      "v1": [
+        0,
+        555,
+        555
+      ],
+      "v2": [
+        555,
+        0,
+        555
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 3,
+      "v0": [
+        213,
+        554,
+        227
+      ],
+      "v1": [
+        343,
+        554,
+        227
+      ],
+      "v2": [
+        213,
+        554,
+        332
+      ]
+    },
+    {
+      "type": "triangle",
+      "material_index": 3,
+      "v0": [
+        343,
+        554,
+        332
+      ],
+      "v1": [
+        213,
+        554,
+        332
+      ],
+      "v2": [
+        343,
+        554,
+        227
+      ]
+    },
+    {
+      "type": "sphere",
+      "material_index": 4,
+      "center": [
+        150,
+        100,
+        150
+      ],
+      "radius": 100
+    },
+    {
+      "type": "sphere",
+      "material_index": 5,
+      "center": [
+        400,
+        100,
+        350
+      ],
+      "radius": 100
+    }
+  ]
+}
